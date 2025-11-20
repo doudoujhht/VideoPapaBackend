@@ -5,7 +5,7 @@ import shutil
 from fastapi.testclient import TestClient
 from unittest.mock import patch, MagicMock
 from io import BytesIO
-from main import app, OUTPUT_DIR
+from server import app, OUTPUT_DIR
 
 
 @pytest.fixture
