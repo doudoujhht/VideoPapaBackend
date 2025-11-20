@@ -1,61 +1,83 @@
-import uuid
-import subprocess
 import os
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
+import subprocess
+import uuid
+from flask import Flask, request, send_file, after_this_request
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
 
-app = FastAPI()
+app = Flask(__name__)
+# Enable CORS to allow your frontend to talk to this backend
+CORS(app)
 
-# Allow frontend requests
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+UPLOAD_FOLDER = '/tmp' if os.path.exists('/tmp') else './temp'
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
 
-OUTPUT_DIR = "videos"
-if not os.path.exists(OUTPUT_DIR):
-    os.makedirs(OUTPUT_DIR)
+@app.route('/convert', methods=['POST'])
+def convert():
+    # 1. Validation
+    if 'audio' not in request.files or 'image' not in request.files:
+        return {"error": "Missing audio or image file"}, 400
 
-@app.post("/create-video")
-async def create_video(image: UploadFile = File(...), audio: UploadFile = File(...)):
-    image_ext = image.filename.split(".")[-1]
-    audio_ext = audio.filename.split(".")[-1]
+    audio = request.files['audio']
+    image = request.files['image']
+    
+    # 2. Setup unique filenames to prevent collisions
+    session_id = str(uuid.uuid4())
+    audio_filename = secure_filename(f"{session_id}_{audio.filename}")
+    image_filename = secure_filename(f"{session_id}_{image.filename}")
+    output_filename = f"{session_id}_output.mp4"
 
-    img_path = f"{OUTPUT_DIR}/{uuid.uuid4()}.{image_ext}"
-    audio_path = f"{OUTPUT_DIR}/{uuid.uuid4()}.{audio_ext}"
-    output_path = f"{OUTPUT_DIR}/{uuid.uuid4()}.mp4"
+    audio_path = os.path.join(UPLOAD_FOLDER, audio_filename)
+    image_path = os.path.join(UPLOAD_FOLDER, image_filename)
+    output_path = os.path.join(UPLOAD_FOLDER, output_filename)
 
-    # Save files
-    with open(img_path, "wb") as f:
-        f.write(await image.read())
-    with open(audio_path, "wb") as f:
-        f.write(await audio.read())
+    try:
+        # 3. Save Uploads
+        audio.save(audio_path)
+        image.save(image_path)
 
-    # FFmpeg command
-    cmd = [
-        "ffmpeg", "-y",
-        "-loop", "1", "-i", img_path,
-        "-i", audio_path,
-        "-map", "0:v:0",
-        "-map", "1:a:0",
-        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-        "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
-        "-c:a", "aac", "-b:a", "192k",
-        "-pix_fmt", "yuv420p",
-        "-shortest",
-        "-movflags", "+faststart",
-        output_path
-    ]
+        # 4. Run FFmpeg via Subprocess
+        # This runs the actual conversion command on the server's OS
+        command = [
+            'ffmpeg',
+            '-loop', '1',              # Loop the image
+            '-i', image_path,          # Input Image
+            '-i', audio_path,          # Input Audio
+            '-c:v', 'libx264',         # Video Codec
+            '-tune', 'stillimage',     # Tuning for static image
+            '-c:a', 'aac',             # Audio Codec
+            '-b:a', '192k',            # Audio Bitrate
+            '-pix_fmt', 'yuv420p',     # Pixel format for compatibility
+            '-shortest',               # End video when audio ends
+            '-y',                      # Overwrite output if exists
+            output_path
+        ]
 
-    subprocess.run(cmd, check=True)
+        # Run command and capture output
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        if result.returncode != 0:
+            print("FFmpeg Error:", result.stderr.decode('utf-8'))
+            return {"error": "Conversion failed on server"}, 500
 
-    return {"video_url": f"/download/{os.path.basename(output_path)}"}
+        # 5. Return the file and cleanup
+        @after_this_request
+        def remove_files(response):
+            try:
+                if os.path.exists(audio_path): os.remove(audio_path)
+                if os.path.exists(image_path): os.remove(image_path)
+                if os.path.exists(output_path): os.remove(output_path)
+            except Exception as e:
+                print(f"Error removing files: {e}")
+            return response
 
+        return send_file(output_path, mimetype='video/mp4', as_attachment=True, download_name='converted.mp4')
 
-@app.get("/download/{filename}")
-def download_video(filename: str):
-    file_path = f"{OUTPUT_DIR}/{filename}"
-    return FileResponse(file_path, media_type="video/mp4", filename="output.mp4")
+    except Exception as e:
+        print(f"Server Error: {e}")
+        return {"error": str(e)}, 500
+
+if __name__ == '__main__':
+    # Run on port 5000
+    app.run(host='0.0.0.0', port=5000, debug=True)

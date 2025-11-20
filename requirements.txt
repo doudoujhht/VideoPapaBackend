@@ -1,5 +1,4 @@
-fastapi
-uvicorn[standard]
-python-multipart
-pytest
-httpx
+Flask==3.0.0
+flask-cors==4.0.0
+werkzeug==3.0.1
+gunicorn==21.2.0
